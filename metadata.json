@@ -1,0 +1,6 @@
+{
+  "name": "AHDO Platform",
+  "description": "Enterprise business operations platform for Advanced Health Development Organization (AHDO), featuring compliance auditing, facility tracking, service management, and a secure client portal.",
+  "requestFramePermissions": ["geolocation"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
