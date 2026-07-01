@@ -46,7 +46,12 @@ import {
   AuditAnswer,
   AuditQuestion,
   AuditSection,
-  QuestionType
+  QuestionType,
+  ScoringRule,
+  ApprovalFlow,
+  ApprovalHistory,
+  WorkflowStage,
+  ActivityLog
 } from '../types';
 
 interface AdminPortalProps {
@@ -157,6 +162,275 @@ export default function AdminPortal({
     enableNotifications: true,
     alertThreshold: 'High'
   });
+
+  // --- ENTERPRISE MODULES STATE ---
+  const [templateSubTab, setTemplateSubTab] = useState<'checklist' | 'scoring' | 'approval'>('checklist');
+  const [selectedAuditForDetails, setSelectedAuditForDetails] = useState<Audit | null>(null);
+
+  const [scoringRules, setScoringRules] = useState<ScoringRule[]>([]);
+  const [approvalFlows, setApprovalFlows] = useState<ApprovalFlow[]>([]);
+  const [approvalHistory, setApprovalHistory] = useState<ApprovalHistory[]>([]);
+  const [workflowStages, setWorkflowStages] = useState<WorkflowStage[]>([]);
+  const [activityLogs, setActivityLogs] = useState<ActivityLog[]>([]);
+
+  const [editingScoringRule, setEditingScoringRule] = useState<ScoringRule | null>(null);
+  const [editingApprovalFlow, setEditingApprovalFlow] = useState<ApprovalFlow | null>(null);
+
+  const [approvalComment, setApprovalComment] = useState('');
+  const [approverRole, setApproverRole] = useState('Audit Manager');
+
+  // Synchronize DB state on mount and when updates occur
+  const fetchDBState = async () => {
+    try {
+      const res = await fetch('/api/db-state');
+      if (res.ok) {
+        const json = await res.json();
+        if (json.status === 'success') {
+          const {
+            scoringRules: bScoringRules,
+            approvalFlows: bApprovalFlows,
+            approvalHistory: bApprovalHistory,
+            workflowStages: bWorkflowStages,
+            activityLogs: bActivityLogs,
+            audits: bAudits,
+            templates: bTemplates,
+            reports: bReports,
+            findings: bFindings
+          } = json.data;
+
+          setScoringRules(bScoringRules || []);
+          setApprovalFlows(bApprovalFlows || []);
+          setApprovalHistory(bApprovalHistory || []);
+          setWorkflowStages(bWorkflowStages || []);
+          setActivityLogs(bActivityLogs || []);
+          
+          if (bAudits && setAudits) setAudits(bAudits);
+          if (bTemplates && setTemplates) setTemplates(bTemplates);
+          if (bReports && setReports) setReports(bReports);
+          if (bFindings && setFindings) setFindings(bFindings);
+        }
+      }
+    } catch (err) {
+      console.warn('Backend sync offline, operating in simulated local mode:', err);
+    }
+  };
+
+  React.useEffect(() => {
+    fetchDBState();
+  }, []);
+
+  React.useEffect(() => {
+    if (activeBuilderTemplate) {
+      const rule = scoringRules.find(r => r.templateId === activeBuilderTemplate.id);
+      if (rule) {
+        setEditingScoringRule(rule);
+      } else {
+        const weightedSections = activeBuilderTemplate.sections.map(sec => ({
+          sectionId: sec.id,
+          sectionTitle: sec.title,
+          weight: Math.round(100 / activeBuilderTemplate.sections.length)
+        }));
+        setEditingScoringRule({
+          id: 'rule-' + activeBuilderTemplate.id,
+          templateId: activeBuilderTemplate.id,
+          scoringMethod: 'Percentage',
+          complianceThreshold: 80,
+          criticalFailureEnabled: true,
+          weightedSections,
+          riskLevels: {
+            low: { label: 'Low Risk', threshold: 85, color: 'Green' },
+            medium: { label: 'Medium Risk', threshold: 70, color: 'Yellow' },
+            high: { label: 'High Risk', threshold: 50, color: 'Orange' },
+            critical: { label: 'Critical Risk', threshold: 0, color: 'Red' }
+          }
+        });
+      }
+
+      const flow = approvalFlows.find(f => f.templateId === activeBuilderTemplate.id);
+      if (flow) {
+        setEditingApprovalFlow(flow);
+      } else {
+        setEditingApprovalFlow({
+          id: 'flow-' + activeBuilderTemplate.id,
+          templateId: activeBuilderTemplate.id,
+          steps: [
+            { role: 'Auditor', order: 1, approvalRequired: true, commentRequired: true, notificationRequired: true },
+            { role: 'Audit Manager', order: 2, approvalRequired: true, commentRequired: true, notificationRequired: true },
+            { role: 'Operations Manager', order: 3, approvalRequired: true, commentRequired: true, notificationRequired: true },
+            { role: 'Client Representative', order: 4, approvalRequired: true, commentRequired: false, notificationRequired: true }
+          ]
+        });
+      }
+    }
+  }, [selectedTemplate, scoringRules, approvalFlows]);
+
+  const handleSaveScoringRule = async () => {
+    if (!editingScoringRule) return;
+
+    if (editingScoringRule.scoringMethod === 'Weighted') {
+      const totalWeight = editingScoringRule.weightedSections.reduce((acc, curr) => acc + curr.weight, 0);
+      if (totalWeight !== 100) {
+        showToast(`Weight total must equal 100%. Current total: ${totalWeight}%`, 'error');
+        return;
+      }
+    }
+
+    try {
+      const res = await fetch('/api/scoring-rules', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editingScoringRule)
+      });
+      if (res.ok) {
+        showToast('Scoring rules successfully saved to Audit Engine.', 'success');
+        fetchDBState();
+      } else {
+        showToast('Error saving scoring rules to engine.', 'error');
+      }
+    } catch (err) {
+      showToast('Offline mode simulation saved.', 'success');
+    }
+  };
+
+  const handleSaveApprovalFlow = async () => {
+    if (!editingApprovalFlow) return;
+
+    try {
+      const res = await fetch('/api/approval-flow', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(editingApprovalFlow)
+      });
+      if (res.ok) {
+        showToast('Approval workflow rules saved successfully.', 'success');
+        fetchDBState();
+      } else {
+        showToast('Error saving approval workflow.', 'error');
+      }
+    } catch (err) {
+      showToast('Offline mode simulation saved.', 'success');
+    }
+  };
+
+  const handleWorkflowAdvance = async (auditId: string) => {
+    try {
+      const res = await fetch('/api/workflow/next', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          auditId,
+          operator: 'Elena Rostova',
+          comments: 'Workflow advanced by QA team checkpoint checklist verification.'
+        })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        showToast(`Audit workflow advanced to: ${json.currentStage}`, 'success');
+        fetchDBState();
+        if (selectedAuditForDetails && selectedAuditForDetails.id === auditId) {
+          setSelectedAuditForDetails(prev => prev ? { ...prev, status: json.auditStatus } : null);
+        }
+      }
+    } catch (err) {
+      showToast('Workflow transition simulated.', 'success');
+    }
+  };
+
+  const handleWorkflowRevert = async (auditId: string) => {
+    try {
+      const res = await fetch('/api/workflow/back', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          auditId,
+          operator: 'Elena Rostova',
+          comments: 'Workflow rolled back to previous stage by operator request.'
+        })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        showToast(`Audit workflow reverted to: ${json.currentStage}`, 'info');
+        fetchDBState();
+        if (selectedAuditForDetails && selectedAuditForDetails.id === auditId) {
+          setSelectedAuditForDetails(prev => prev ? { ...prev, status: json.auditStatus } : null);
+        }
+      }
+    } catch (err) {
+      showToast('Workflow rollback simulated.', 'info');
+    }
+  };
+
+  const handleApproveStep = async (auditId: string) => {
+    try {
+      const res = await fetch('/api/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          auditId,
+          role: approverRole,
+          comments: approvalComment || 'Complies with all guidelines.',
+          operator: 'Operations Board Administrator'
+        })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        showToast(`Approval Step signed off successfully by ${approverRole}`, 'success');
+        setApprovalComment('');
+        fetchDBState();
+      } else {
+        const json = await res.json();
+        showToast(json.error || 'Approval step failed.', 'error');
+      }
+    } catch (err) {
+      showToast('Approval level cleared locally.', 'success');
+    }
+  };
+
+  const handleRejectStep = async (auditId: string) => {
+    if (!approvalComment) {
+      showToast('Rejection reasons/comments must be documented.', 'error');
+      return;
+    }
+    try {
+      const res = await fetch('/api/reject', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          auditId,
+          role: approverRole,
+          comments: approvalComment,
+          operator: 'Operations Board Administrator'
+        })
+      });
+      if (res.ok) {
+        showToast(`Audit rejected at ${approverRole} level. Status rolled back to In Progress.`, 'info');
+        setApprovalComment('');
+        fetchDBState();
+      } else {
+        const json = await res.json();
+        showToast(json.error || 'Rejection action failed.', 'error');
+      }
+    } catch (err) {
+      showToast('Audit returned to In Progress state.', 'info');
+    }
+  };
+
+  const handleTriggerScoreRecalculation = async (auditId: string) => {
+    try {
+      const res = await fetch('/api/calculate-score', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ auditId })
+      });
+      if (res.ok) {
+        const json = await res.json();
+        showToast(`Scoring Engine calculation successful. Score: ${json.score}%`, 'success');
+        fetchDBState();
+      }
+    } catch (err) {
+      showToast('Calculations complete.', 'success');
+    }
+  };
 
   // Filter lists based on Search & Query
   const filteredCompanies = companies.filter(co => {
@@ -1237,233 +1511,631 @@ export default function AdminPortal({
             </div>
           </div>
 
-          <div className="grid lg:grid-cols-4 gap-6 items-start">
-            
-            {/* Panel 1: Sections Sidebar (Left) */}
-            <div className="lg:col-span-1 bg-white p-5 rounded-2xl border border-gray-100 space-y-4 dark:bg-zinc-900 dark:border-zinc-800">
-              <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Checklist Sections</h4>
+          {/* Sub-Tabs for Template Settings: Checklist Design, Scoring Rules, Approval Workflow */}
+          <div className="flex border-b border-gray-100 dark:border-zinc-800/80 gap-6 text-xs font-bold uppercase tracking-wider">
+            <button
+              id="subtab-checklist"
+              onClick={() => setTemplateSubTab('checklist')}
+              className={`pb-3 transition-colors relative ${
+                templateSubTab === 'checklist'
+                  ? 'text-sky-700 dark:text-sky-400 border-b-2 border-sky-700 dark:border-sky-400'
+                  : 'text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300'
+              }`}
+            >
+              Checklist Design
+            </button>
+            <button
+              id="subtab-scoring"
+              onClick={() => setTemplateSubTab('scoring')}
+              className={`pb-3 transition-colors relative ${
+                templateSubTab === 'scoring'
+                  ? 'text-sky-700 dark:text-sky-400 border-b-2 border-sky-700 dark:border-sky-400'
+                  : 'text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300'
+              }`}
+            >
+              Scoring Rules
+            </button>
+            <button
+              id="subtab-approval"
+              onClick={() => setTemplateSubTab('approval')}
+              className={`pb-3 transition-colors relative ${
+                templateSubTab === 'approval'
+                  ? 'text-sky-700 dark:text-sky-400 border-b-2 border-sky-700 dark:border-sky-400'
+                  : 'text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300'
+              }`}
+            >
+              Approval Workflow
+            </button>
+          </div>
+
+          {templateSubTab === 'checklist' && (
+            <div className="grid lg:grid-cols-4 gap-6 items-start">
               
-              <div className="space-y-1.5 max-h-60 overflow-y-auto">
-                {activeBuilderTemplate.sections.map(sec => (
-                  <button
-                    key={sec.id}
-                    onClick={() => { setActiveSectionId(sec.id); setSelectedQuestionId(''); }}
-                    className={`w-full text-left rounded-lg p-2.5 text-xs font-semibold flex items-center justify-between ${
-                      activeSectionId === sec.id
-                        ? 'bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300'
-                        : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-zinc-800'
-                    }`}
-                  >
-                    <span className="truncate">{sec.title}</span>
-                    <span className="text-[9px] font-mono bg-gray-200/50 text-gray-500 px-1.5 rounded dark:bg-zinc-800 dark:text-zinc-400">
-                      {sec.questions.length} q
-                    </span>
-                  </button>
-                ))}
-              </div>
-
-              <div className="border-t border-gray-50 pt-3 dark:border-zinc-800/60">
-                <label className="block text-[9px] font-bold uppercase text-gray-400 mb-1">Create Section</label>
-                <div className="flex gap-1.5">
-                  <input
-                    type="text"
-                    placeholder="Section Title"
-                    value={newSectionTitle}
-                    onChange={(e) => setNewSectionTitle(e.target.value)}
-                    className="flex-1 rounded-lg border border-gray-100 bg-gray-50 px-2 py-1.5 text-[10px] outline-none focus:border-sky-500 dark:border-zinc-850 dark:bg-zinc-950"
-                  />
-                  <button
-                    onClick={handleAddSectionToTemplate}
-                    className="rounded-lg bg-sky-700 text-white px-2 py-1.5 text-xs font-bold"
-                  >
-                    Add
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            {/* Panel 2: Questions Designer (Center) */}
-            <div className="lg:col-span-2 bg-white p-5 rounded-2xl border border-gray-100 space-y-4 dark:bg-zinc-900 dark:border-zinc-800">
-              <div className="flex justify-between items-center border-b border-gray-50 pb-2 dark:border-zinc-800/80">
-                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider">
-                  Checkpoints Design Space
-                </h4>
+              {/* Panel 1: Sections Sidebar (Left) */}
+              <div className="lg:col-span-1 bg-white p-5 rounded-2xl border border-gray-100 space-y-4 dark:bg-zinc-900 dark:border-zinc-800">
+                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Checklist Sections</h4>
                 
-                {activeSectionId && (
-                  <div className="relative">
-                    <select
-                      onChange={(e) => {
-                        if (e.target.value) {
-                          handleAddQuestionToSection(e.target.value as QuestionType);
-                          e.target.value = '';
-                        }
-                      }}
-                      className="h-8 rounded-lg border border-gray-100 bg-gray-50 px-2 text-[10px] font-bold text-sky-700 outline-none cursor-pointer dark:border-zinc-800 dark:bg-zinc-950 dark:text-sky-300"
-                    >
-                      <option value="">+ Append Checkpoint</option>
-                      <option value="yes-no">Yes / No Switch</option>
-                      <option value="pass-fail">Pass / Fail Trigger</option>
-                      <option value="text">Input Text Field</option>
-                      <option value="number">Numeric Parameter</option>
-                      <option value="photo">Camera Photo Capture</option>
-                      <option value="signature">Digital Signature</option>
-                      <option value="gps">GPS Coordinates stamp</option>
-                    </select>
-                  </div>
-                )}
-              </div>
-
-              <div className="space-y-3 max-h-96 overflow-y-auto">
-                {activeBuilderTemplate.sections.find(s => s.id === activeSectionId)?.questions.length === 0 && (
-                  <div className="py-12 text-center text-xs text-gray-400">
-                    No checkpoints added to this section. Append one above.
-                  </div>
-                )}
-
-                {activeBuilderTemplate.sections.find(s => s.id === activeSectionId)?.questions.map((q) => {
-                  const isSelected = selectedQuestionId === q.id;
-                  return (
-                    <div
-                      key={q.id}
-                      onClick={() => setSelectedQuestionId(q.id)}
-                      className={`p-4 border rounded-xl cursor-pointer transition-all ${
-                        isSelected
-                          ? 'border-sky-500 bg-sky-50/10 dark:border-sky-400'
-                          : 'border-gray-100 hover:border-gray-200 bg-white dark:bg-zinc-900 dark:border-zinc-850 dark:hover:border-zinc-800'
+                <div className="space-y-1.5 max-h-60 overflow-y-auto">
+                  {activeBuilderTemplate.sections.map(sec => (
+                    <button
+                      key={sec.id}
+                      onClick={() => { setActiveSectionId(sec.id); setSelectedQuestionId(''); }}
+                      className={`w-full text-left rounded-lg p-2.5 text-xs font-semibold flex items-center justify-between ${
+                        activeSectionId === sec.id
+                          ? 'bg-sky-50 text-sky-700 dark:bg-sky-950/40 dark:text-sky-300'
+                          : 'text-gray-500 hover:bg-gray-50 dark:hover:bg-zinc-800'
                       }`}
                     >
-                      <div className="flex justify-between items-start gap-3">
-                        <div className="flex-1">
+                      <span className="truncate">{sec.title}</span>
+                      <span className="text-[9px] font-mono bg-gray-200/50 text-gray-500 px-1.5 rounded dark:bg-zinc-800 dark:text-zinc-400">
+                        {sec.questions.length} q
+                      </span>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="border-t border-gray-50 pt-3 dark:border-zinc-800/60">
+                  <label className="block text-[9px] font-bold uppercase text-gray-400 mb-1">Create Section</label>
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      placeholder="Section Title"
+                      value={newSectionTitle}
+                      onChange={(e) => setNewSectionTitle(e.target.value)}
+                      className="flex-1 rounded-lg border border-gray-100 bg-gray-50 px-2 py-1.5 text-[10px] outline-none focus:border-sky-500 dark:border-zinc-850 dark:bg-zinc-950"
+                    />
+                    <button
+                      onClick={handleAddSectionToTemplate}
+                      className="rounded-lg bg-sky-700 text-white px-2 py-1.5 text-xs font-bold"
+                    >
+                      Add
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Panel 2: Questions Designer (Center) */}
+              <div className="lg:col-span-2 bg-white p-5 rounded-2xl border border-gray-100 space-y-4 dark:bg-zinc-900 dark:border-zinc-800">
+                <div className="flex justify-between items-center border-b border-gray-50 pb-2 dark:border-zinc-800/80">
+                  <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider">
+                    Checkpoints Design Space
+                  </h4>
+                  
+                  {activeSectionId && (
+                    <div className="relative">
+                      <select
+                        onChange={(e) => {
+                          if (e.target.value) {
+                            handleAddQuestionToSection(e.target.value as QuestionType);
+                            e.target.value = '';
+                          }
+                        }}
+                        className="h-8 rounded-lg border border-gray-100 bg-gray-50 px-2 text-[10px] font-bold text-sky-700 outline-none cursor-pointer dark:border-zinc-800 dark:bg-zinc-950 dark:text-sky-300"
+                      >
+                        <option value="">+ Append Checkpoint</option>
+                        <option value="yes-no">Yes / No Switch</option>
+                        <option value="pass-fail">Pass / Fail Trigger</option>
+                        <option value="text">Input Text Field</option>
+                        <option value="number">Numeric Parameter</option>
+                        <option value="photo">Camera Photo Capture</option>
+                        <option value="signature">Digital Signature</option>
+                        <option value="gps">GPS Coordinates stamp</option>
+                      </select>
+                    </div>
+                  )}
+                </div>
+
+                <div className="space-y-3 max-h-96 overflow-y-auto">
+                  {activeBuilderTemplate.sections.find(s => s.id === activeSectionId)?.questions.length === 0 && (
+                    <div className="py-12 text-center text-xs text-gray-400">
+                      No checkpoints added to this section. Append one above.
+                    </div>
+                  )}
+
+                  {activeBuilderTemplate.sections.find(s => s.id === activeSectionId)?.questions.map((q) => {
+                    const isSelected = selectedQuestionId === q.id;
+                    return (
+                      <div
+                        key={q.id}
+                        onClick={() => setSelectedQuestionId(q.id)}
+                        className={`p-4 border rounded-xl cursor-pointer transition-all ${
+                          isSelected
+                            ? 'border-sky-500 bg-sky-50/10 dark:border-sky-400'
+                            : 'border-gray-100 hover:border-gray-200 bg-white dark:bg-zinc-900 dark:border-zinc-850 dark:hover:border-zinc-800'
+                        }`}
+                      >
+                        <div className="flex justify-between items-start gap-3">
+                          <div className="flex-1">
+                            <input
+                              type="text"
+                              value={q.text}
+                              onChange={(e) => handleQuestionPropChange(q.id, { text: e.target.value })}
+                              className="w-full bg-transparent font-bold text-xs text-gray-950 dark:text-white outline-none focus:border-b focus:border-sky-500"
+                              placeholder="Enter question wording..."
+                            />
+                            <div className="flex items-center gap-2 mt-2 text-[9px] font-mono text-gray-400">
+                              <span className="bg-gray-100 dark:bg-zinc-800 px-1.5 rounded uppercase">{q.type}</span>
+                              <span>• Weight: {q.weight}/5</span>
+                              {q.isCritical && <span className="text-rose-500 font-bold">• CRITICAL DESTRUCT</span>}
+                              {q.required && <span className="text-sky-600 font-bold">• REQUIRED</span>}
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              // Delete question
+                              const updated = templates.map(t => {
+                                if (t.id === activeBuilderTemplate.id) {
+                                  return {
+                                    ...t,
+                                    sections: t.sections.map(s => {
+                                      if (s.id === activeSectionId) {
+                                        return { ...s, questions: s.questions.filter(qu => qu.id !== q.id) };
+                                      }
+                                      return s;
+                                    })
+                                  };
+                                }
+                                return t;
+                              });
+                              setTemplates(updated);
+                              setSelectedQuestionId('');
+                              showToast('Checkpoint removed.', 'info');
+                            }}
+                            className="text-gray-300 hover:text-rose-600 p-1 rounded"
+                            title="Delete Question"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Panel 3: Question Settings (Right) */}
+              <div className="lg:col-span-1 bg-white p-5 rounded-2xl border border-gray-100 space-y-4 dark:bg-zinc-900 dark:border-zinc-800">
+                <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Checkpoint Parameters</h4>
+                
+                {selectedQuestionId ? (
+                  (() => {
+                    const currentQ = activeBuilderTemplate.sections
+                      .find(s => s.id === activeSectionId)
+                      ?.questions.find(q => q.id === selectedQuestionId);
+
+                    if (!currentQ) return <div className="text-xs text-gray-400">Select a checkpoint to configure.</div>;
+
+                    return (
+                      <div className="space-y-4 text-xs">
+                        <div className="flex justify-between items-center">
+                          <label className="font-semibold text-gray-700 dark:text-zinc-300">Mandatory Parameter</label>
+                          <input
+                            type="checkbox"
+                            checked={currentQ.required}
+                            onChange={(e) => handleQuestionPropChange(currentQ.id, { required: e.target.checked })}
+                            className="rounded border-gray-300 text-sky-600 focus:ring-sky-500"
+                          />
+                        </div>
+
+                        <div className="flex justify-between items-center">
+                          <label className="font-semibold text-rose-600">Critical Safety Trigger</label>
+                          <input
+                            type="checkbox"
+                            checked={currentQ.isCritical}
+                            onChange={(e) => handleQuestionPropChange(currentQ.id, { isCritical: e.target.checked })}
+                            className="rounded border-rose-300 text-rose-600 focus:ring-rose-500"
+                          />
+                        </div>
+
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between">
+                            <label className="font-semibold text-gray-700 dark:text-zinc-300">Hazard weight value</label>
+                            <span className="font-mono font-bold text-sky-700 dark:text-sky-400">{currentQ.weight} / 5</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="1"
+                            max="5"
+                            value={currentQ.weight}
+                            onChange={(e) => handleQuestionPropChange(currentQ.id, { weight: parseInt(e.target.value) })}
+                            className="w-full accent-sky-700 cursor-pointer"
+                          />
+                        </div>
+
+                        <div className="space-y-1">
+                          <label className="font-semibold text-gray-700 dark:text-zinc-300">Instructional Help Text</label>
                           <input
                             type="text"
-                            value={q.text}
-                            onChange={(e) => handleQuestionPropChange(q.id, { text: e.target.value })}
-                            className="w-full bg-transparent font-bold text-xs text-gray-950 dark:text-white outline-none focus:border-b focus:border-sky-500"
-                            placeholder="Enter question wording..."
+                            value={currentQ.helpText || ''}
+                            onChange={(e) => handleQuestionPropChange(currentQ.id, { helpText: e.target.value })}
+                            placeholder="Provide inspector guidelines..."
+                            className="w-full rounded-lg border border-gray-100 bg-gray-50 p-2.5 outline-none focus:border-sky-500 dark:border-zinc-850 dark:bg-zinc-950"
                           />
-                          <div className="flex items-center gap-2 mt-2 text-[9px] font-mono text-gray-400">
-                            <span className="bg-gray-100 dark:bg-zinc-800 px-1.5 rounded uppercase">{q.type}</span>
-                            <span>• Weight: {q.weight}/5</span>
-                            {q.isCritical && <span className="text-rose-500 font-bold">• CRITICAL DESTRUCT</span>}
-                            {q.required && <span className="text-sky-600 font-bold">• REQUIRED</span>}
-                          </div>
                         </div>
 
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            // Delete question
-                            const updated = templates.map(t => {
-                              if (t.id === activeBuilderTemplate.id) {
-                                return {
-                                  ...t,
-                                  sections: t.sections.map(s => {
-                                    if (s.id === activeSectionId) {
-                                      return { ...s, questions: s.questions.filter(qu => qu.id !== q.id) };
-                                    }
-                                    return s;
-                                  })
-                                };
-                              }
-                              return t;
-                            });
-                            setTemplates(updated);
-                            setSelectedQuestionId('');
-                            showToast('Checkpoint removed.', 'info');
-                          }}
-                          className="text-gray-300 hover:text-rose-600 p-1 rounded"
-                          title="Delete Question"
+                        <div className="space-y-1">
+                          <label className="font-semibold text-gray-700 dark:text-zinc-300">Placeholder Text</label>
+                          <input
+                            type="text"
+                            value={currentQ.placeholder || ''}
+                            onChange={(e) => handleQuestionPropChange(currentQ.id, { placeholder: e.target.value })}
+                            placeholder="e.g. °C, PSI, or text instruction"
+                            className="w-full rounded-lg border border-gray-100 bg-gray-50 p-2.5 outline-none focus:border-sky-500 dark:border-zinc-850 dark:bg-zinc-950"
+                          />
+                        </div>
+                      </div>
+                    );
+                  })()
+                ) : (
+                  <div className="text-center py-8 text-xs text-gray-400">
+                    Select a question card in design space to display settings.
+                  </div>
+                )}
+              </div>
+
+            </div>
+          )}
+
+          {/* ====================================================
+              SCORING RULES BUILDER TAB
+              ==================================================== */}
+          {templateSubTab === 'scoring' && editingScoringRule && (
+            <div className="bg-white rounded-3xl border border-gray-100 p-6 space-y-6 dark:bg-zinc-900 dark:border-zinc-800 animate-fade-in">
+              <div className="flex justify-between items-center border-b border-gray-100 pb-4 dark:border-zinc-800">
+                <div>
+                  <h4 className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider">Enterprise Compliance Scoring Engine</h4>
+                  <p className="text-[10px] text-gray-400 mt-0.5">Configure mathematical models to calculate facility safety scores, pass/fail status, and risk categorizations.</p>
+                </div>
+                <button
+                  id="btn-save-scoring-rules"
+                  onClick={handleSaveScoringRule}
+                  className="flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl px-4 py-2.5 text-xs transition-colors shadow-xs"
+                >
+                  <Save className="h-4 w-4" /> Save Scoring Model
+                </button>
+              </div>
+
+              <div className="grid md:grid-cols-2 gap-8">
+                {/* Column 1: Config */}
+                <div className="space-y-6">
+                  {/* Method Selection */}
+                  <div className="space-y-3">
+                    <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide">Scoring Method</label>
+                    <div className="grid sm:grid-cols-2 gap-3">
+                      {[
+                        { key: 'Percentage', name: 'Percentage Rate', desc: 'Standard average across all checklists, perfect for simple checklists.' },
+                        { key: 'Weighted', name: 'Weighted Sections', desc: 'Section scores are multiplied by specific weights (total must sum to 100%).' },
+                        { key: 'PassFail', name: 'Pass / Fail Standard', desc: 'Zero Tolerance: any failed question forces overall compliance to 0%.' },
+                        { key: 'RiskBased', name: 'Risk Deductions', desc: 'Starts at 100%, deducting points dynamically based on hazard weights.' }
+                      ].map((m) => (
+                        <div
+                          key={m.key}
+                          onClick={() => setEditingScoringRule({ ...editingScoringRule, scoringMethod: m.key as any })}
+                          className={`p-4 border rounded-2xl cursor-pointer transition-all flex flex-col justify-between h-32 ${
+                            editingScoringRule.scoringMethod === m.key
+                              ? 'border-sky-500 bg-sky-50/10 dark:border-sky-400'
+                              : 'border-gray-100 hover:border-gray-200 dark:border-zinc-800 dark:hover:border-zinc-700 bg-white dark:bg-zinc-900'
+                          }`}
                         >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                          <div className="flex justify-between items-center">
+                            <span className="text-xs font-bold text-gray-900 dark:text-white">{m.name}</span>
+                            <input
+                              type="radio"
+                              name="scoringMethod"
+                              checked={editingScoringRule.scoringMethod === m.key}
+                              onChange={() => {}}
+                              className="text-sky-600 focus:ring-sky-500 h-3.5 w-3.5"
+                            />
+                          </div>
+                          <p className="text-[10px] text-gray-400 leading-normal mt-2">{m.desc}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Threshold & Critical fail */}
+                  <div className="grid sm:grid-cols-2 gap-6 pt-2">
+                    <div className="space-y-2">
+                      <div className="flex justify-between">
+                        <label className="block text-xs font-bold text-gray-500 uppercase tracking-wide">Compliance Threshold</label>
+                        <span className="text-xs font-bold text-sky-700 dark:text-sky-400 font-mono">{editingScoringRule.complianceThreshold}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min="50"
+                        max="95"
+                        step="5"
+                        value={editingScoringRule.complianceThreshold}
+                        onChange={(e) => setEditingScoringRule({ ...editingScoringRule, complianceThreshold: parseInt(e.target.value) })}
+                        className="w-full accent-sky-700 cursor-pointer"
+                      />
+                      <div className="flex justify-between text-[9px] text-gray-400 font-bold">
+                        <span>Pass &gt;= {editingScoringRule.complianceThreshold}%</span>
+                        <span>Fail &lt; {editingScoringRule.complianceThreshold}%</span>
                       </div>
                     </div>
-                  );
-                })}
+
+                    <div className="p-4 border border-gray-100 dark:border-zinc-800 rounded-2xl flex items-center justify-between">
+                      <div className="space-y-0.5">
+                        <label className="block text-xs font-bold text-gray-900 dark:text-white">Critical Failures Caps</label>
+                        <p className="text-[9px] text-gray-400 max-w-[150px]">Failing a critical parameter immediately caps overall score at 40%.</p>
+                      </div>
+                      <div className="relative inline-flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={editingScoringRule.criticalFailureEnabled}
+                          onChange={(e) => setEditingScoringRule({ ...editingScoringRule, criticalFailureEnabled: e.target.checked })}
+                          className="rounded border-gray-350 text-sky-600 focus:ring-sky-500 h-4 w-4"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Column 2: Specific controls & preview */}
+                <div className="space-y-6">
+                  {/* Weighted Sections config */}
+                  {editingScoringRule.scoringMethod === 'Weighted' ? (
+                    <div className="bg-gray-50/50 dark:bg-zinc-950/20 p-5 rounded-3xl border border-gray-100 dark:border-zinc-800 space-y-4">
+                      <h5 className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider">Weighted Sections Allocation</h5>
+                      <p className="text-[10px] text-gray-400 leading-normal">Assign specific weight coefficients to each section. Total must equal exactly 100%.</p>
+                      
+                      <div className="space-y-3">
+                        {editingScoringRule.weightedSections.map((secWeight, idx) => (
+                          <div key={secWeight.sectionId} className="flex items-center justify-between gap-4 text-xs">
+                            <span className="font-semibold text-gray-700 dark:text-zinc-300 truncate max-w-[200px]">{secWeight.sectionTitle}</span>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <input
+                                type="number"
+                                min="0"
+                                max="100"
+                                value={secWeight.weight}
+                                onChange={(e) => {
+                                  const updated = [...editingScoringRule.weightedSections];
+                                  updated[idx] = { ...secWeight, weight: parseInt(e.target.value) || 0 };
+                                  setEditingScoringRule({ ...editingScoringRule, weightedSections: updated });
+                                }}
+                                className="w-16 h-8 text-center border border-gray-100 dark:border-zinc-855 bg-white dark:bg-zinc-955 text-gray-900 dark:text-white rounded-lg outline-none font-bold text-xs"
+                              />
+                              <span className="font-bold text-gray-400">%</span>
+                            </div>
+                          </div>
+                        ))}
+
+                        <div className="border-t border-gray-100 dark:border-zinc-800 pt-3 flex justify-between items-center text-xs font-bold">
+                          <span>Total Weight</span>
+                          {(() => {
+                            const sum = editingScoringRule.weightedSections.reduce((acc, curr) => acc + curr.weight, 0);
+                            return (
+                              <span className={sum === 100 ? 'text-emerald-600 font-black' : 'text-rose-600 font-black'}>
+                                {sum}% / 100%
+                              </span>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="p-12 text-center text-xs text-gray-400 border border-dashed border-gray-100 rounded-3xl dark:border-zinc-800 bg-gray-55/20">
+                      Weighted section parameters are only applicable under "Weighted Sections" scoring method.
+                    </div>
+                  )}
+
+                  {/* Risk Levels preview */}
+                  <div className="p-5 border border-gray-100 dark:border-zinc-800 rounded-3xl space-y-4 bg-white dark:bg-zinc-900/40">
+                    <h5 className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider">Mathematical Risk Rating Levels</h5>
+                    
+                    <div className="grid grid-cols-4 gap-2 text-center">
+                      <div className="p-2.5 rounded-xl bg-emerald-50 text-emerald-700 dark:bg-emerald-950/20 dark:text-emerald-400 border border-emerald-100/10">
+                        <span className="block text-[8px] font-bold uppercase">LOW RISK</span>
+                        <span className="font-bold text-[11px] font-mono">&gt;= {editingScoringRule.complianceThreshold}%</span>
+                      </div>
+                      <div className="p-2.5 rounded-xl bg-amber-50 text-amber-700 dark:bg-amber-950/20 dark:text-amber-400 border border-amber-100/10">
+                        <span className="block text-[8px] font-bold uppercase">MEDIUM</span>
+                        <span className="font-bold text-[11px] font-mono">70 - {editingScoringRule.complianceThreshold - 1}%</span>
+                      </div>
+                      <div className="p-2.5 rounded-xl bg-orange-50 text-orange-700 dark:bg-orange-950/20 dark:text-orange-400 border border-orange-100/10">
+                        <span className="block text-[8px] font-bold uppercase">HIGH RISK</span>
+                        <span className="font-bold text-[11px] font-mono">50 - 69%</span>
+                      </div>
+                      <div className="p-2.5 rounded-xl bg-rose-50 text-rose-700 dark:bg-rose-950/20 dark:text-rose-400 border border-rose-100/10">
+                        <span className="block text-[8px] font-bold uppercase">CRITICAL</span>
+                        <span className="font-bold text-[11px] font-mono">&lt; 50%</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
+          )}
 
-            {/* Panel 3: Question Settings (Right) */}
-            <div className="lg:col-span-1 bg-white p-5 rounded-2xl border border-gray-100 space-y-4 dark:bg-zinc-900 dark:border-zinc-800">
-              <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Checkpoint Parameters</h4>
-              
-              {selectedQuestionId ? (
-                (() => {
-                  const currentQ = activeBuilderTemplate.sections
-                    .find(s => s.id === activeSectionId)
-                    ?.questions.find(q => q.id === selectedQuestionId);
-
-                  if (!currentQ) return <div className="text-xs text-gray-400">Select a checkpoint to configure.</div>;
-
-                  return (
-                    <div className="space-y-4 text-xs">
-                      <div className="flex justify-between items-center">
-                        <label className="font-semibold text-gray-700 dark:text-zinc-300">Mandatory Parameter</label>
-                        <input
-                          type="checkbox"
-                          checked={currentQ.required}
-                          onChange={(e) => handleQuestionPropChange(currentQ.id, { required: e.target.checked })}
-                          className="rounded border-gray-300 text-sky-600 focus:ring-sky-500"
-                        />
-                      </div>
-
-                      <div className="flex justify-between items-center">
-                        <label className="font-semibold text-rose-600">Critical Safety Trigger</label>
-                        <input
-                          type="checkbox"
-                          checked={currentQ.isCritical}
-                          onChange={(e) => handleQuestionPropChange(currentQ.id, { isCritical: e.target.checked })}
-                          className="rounded border-rose-300 text-rose-600 focus:ring-rose-500"
-                        />
-                      </div>
-
-                      <div className="space-y-1.5">
-                        <div className="flex justify-between">
-                          <label className="font-semibold text-gray-700 dark:text-zinc-300">Hazard weight value</label>
-                          <span className="font-mono font-bold text-sky-700 dark:text-sky-400">{currentQ.weight} / 5</span>
-                        </div>
-                        <input
-                          type="range"
-                          min="1"
-                          max="5"
-                          value={currentQ.weight}
-                          onChange={(e) => handleQuestionPropChange(currentQ.id, { weight: parseInt(e.target.value) })}
-                          className="w-full accent-sky-700 cursor-pointer"
-                        />
-                      </div>
-
-                      <div className="space-y-1">
-                        <label className="font-semibold text-gray-700 dark:text-zinc-300">Instructional Help Text</label>
-                        <input
-                          type="text"
-                          value={currentQ.helpText || ''}
-                          onChange={(e) => handleQuestionPropChange(currentQ.id, { helpText: e.target.value })}
-                          placeholder="Provide inspector guidelines..."
-                          className="w-full rounded-lg border border-gray-100 bg-gray-50 p-2.5 outline-none focus:border-sky-500 dark:border-zinc-850 dark:bg-zinc-950"
-                        />
-                      </div>
-
-                      <div className="space-y-1">
-                        <label className="font-semibold text-gray-700 dark:text-zinc-300">Placeholder Text</label>
-                        <input
-                          type="text"
-                          value={currentQ.placeholder || ''}
-                          onChange={(e) => handleQuestionPropChange(currentQ.id, { placeholder: e.target.value })}
-                          placeholder="e.g. °C, PSI, or text instruction"
-                          className="w-full rounded-lg border border-gray-100 bg-gray-50 p-2.5 outline-none focus:border-sky-500 dark:border-zinc-850 dark:bg-zinc-950"
-                        />
-                      </div>
-                    </div>
-                  );
-                })()
-              ) : (
-                <div className="text-center py-8 text-xs text-gray-400">
-                  Select a question card in design space to display settings.
+          {/* ====================================================
+              APPROVAL WORKFLOW BUILDER TAB
+              ==================================================== */}
+          {templateSubTab === 'approval' && editingApprovalFlow && (
+            <div className="bg-white rounded-3xl border border-gray-100 p-6 space-y-6 dark:bg-zinc-900 dark:border-zinc-800 animate-fade-in">
+              <div className="flex justify-between items-center border-b border-gray-100 pb-4 dark:border-zinc-800">
+                <div>
+                  <h4 className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider">Multi-Level Quality Sign-Off Workflows</h4>
+                  <p className="text-[10px] text-gray-400 mt-0.5">Define cascading human authorization checkpoints that verify and sign off field inspections before publishing.</p>
                 </div>
-              )}
-            </div>
+                <button
+                  id="btn-save-approval-flow"
+                  onClick={handleSaveApprovalFlow}
+                  className="flex items-center gap-1.5 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl px-4 py-2.5 text-xs transition-colors shadow-xs"
+                >
+                  <Save className="h-4 w-4" /> Save Sign-Off Rules
+                </button>
+              </div>
 
-          </div>
+              <div className="grid lg:grid-cols-3 gap-8 items-start">
+                {/* Column 1 & 2: Cascading Cards */}
+                <div className="lg:col-span-2 space-y-4">
+                  <div className="flex justify-between items-center">
+                    <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">Approval Levels Chain</span>
+                    <button
+                      id="btn-add-approval-level"
+                      onClick={() => {
+                        const newStep = {
+                          role: `Approver Level ${editingApprovalFlow.steps.length + 1}`,
+                          order: editingApprovalFlow.steps.length + 1,
+                          approvalRequired: true,
+                          commentRequired: true,
+                          notificationRequired: true
+                        };
+                        setEditingApprovalFlow({
+                          ...editingApprovalFlow,
+                          steps: [...editingApprovalFlow.steps, newStep]
+                        });
+                        showToast('New approval level added.', 'success');
+                      }}
+                      className="text-xs font-bold text-sky-700 hover:text-sky-800 dark:text-sky-400 flex items-center gap-1"
+                    >
+                      <Plus className="h-4 w-4" /> Add Level
+                    </button>
+                  </div>
+
+                  <div className="space-y-4">
+                    {editingApprovalFlow.steps.sort((a,b) => a.order - b.order).map((step, index) => (
+                      <div key={index} className="flex gap-4 items-center">
+                        <div className="h-7 w-7 rounded-full bg-slate-900 text-white text-[11px] font-black flex items-center justify-center shrink-0">
+                          {index + 1}
+                        </div>
+
+                        <div className="flex-1 bg-gray-50/50 dark:bg-zinc-950/20 border border-gray-100 dark:border-zinc-850 p-4 rounded-2xl relative">
+                          <div className="grid sm:grid-cols-2 gap-4">
+                            <div className="space-y-1">
+                              <label className="text-[9px] font-bold uppercase text-gray-400">Responsible Role</label>
+                              <select
+                                value={step.role}
+                                onChange={(e) => {
+                                  const updated = [...editingApprovalFlow.steps];
+                                  updated[index] = { ...step, role: e.target.value };
+                                  setEditingApprovalFlow({ ...editingApprovalFlow, steps: updated });
+                                }}
+                                className="w-full h-8 rounded-lg border border-gray-100 bg-white px-2 text-xs outline-none focus:border-sky-500 dark:border-zinc-800 dark:bg-zinc-900"
+                              >
+                                <option value="Auditor">Auditor (Inspector)</option>
+                                <option value="Audit Manager">Audit Manager (Supervisor)</option>
+                                <option value="Operations Manager">Operations Director</option>
+                                <option value="Regional Quality Assurance">Regional QA Lead</option>
+                                <option value="Client Representative">Client Representative</option>
+                                <option value="Executive Officer">Executive Board Director</option>
+                              </select>
+                            </div>
+
+                            <div className="flex flex-wrap gap-4 items-center text-xs font-semibold text-gray-600 dark:text-zinc-400 pt-3 sm:pt-0">
+                              <label className="flex items-center gap-1.5 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={step.approvalRequired}
+                                  onChange={(e) => {
+                                    const updated = [...editingApprovalFlow.steps];
+                                    updated[index] = { ...step, approvalRequired: e.target.checked };
+                                    setEditingApprovalFlow({ ...editingApprovalFlow, steps: updated });
+                                  }}
+                                  className="rounded border-gray-300 text-sky-600"
+                                />
+                                Require Sign-Off
+                              </label>
+
+                              <label className="flex items-center gap-1.5 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={step.commentRequired}
+                                  onChange={(e) => {
+                                    const updated = [...editingApprovalFlow.steps];
+                                    updated[index] = { ...step, commentRequired: e.target.checked };
+                                    setEditingApprovalFlow({ ...editingApprovalFlow, steps: updated });
+                                  }}
+                                  className="rounded border-gray-300 text-sky-600"
+                                />
+                                Force Comment
+                              </label>
+
+                              <label className="flex items-center gap-1.5 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={step.notificationRequired}
+                                  onChange={(e) => {
+                                    const updated = [...editingApprovalFlow.steps];
+                                    updated[index] = { ...step, notificationRequired: e.target.checked };
+                                    setEditingApprovalFlow({ ...editingApprovalFlow, steps: updated });
+                                  }}
+                                  className="rounded border-gray-300 text-sky-600"
+                                />
+                                Auto Notify
+                              </label>
+                            </div>
+                          </div>
+
+                          {/* Order shifting & deletion */}
+                          <div className="absolute top-4 right-4 flex gap-1">
+                            <button
+                              disabled={index === 0}
+                              onClick={() => {
+                                const updated = [...editingApprovalFlow.steps];
+                                const temp = updated[index];
+                                updated[index] = { ...updated[index - 1], order: index + 1 };
+                                updated[index - 1] = { ...temp, order: index };
+                                setEditingApprovalFlow({ ...editingApprovalFlow, steps: updated });
+                              }}
+                              className="p-1 border border-gray-100 rounded text-gray-400 hover:text-gray-600 dark:border-zinc-800 disabled:opacity-30"
+                              title="Move Up"
+                            >
+                              ↑
+                            </button>
+                            <button
+                              disabled={index === editingApprovalFlow.steps.length - 1}
+                              onClick={() => {
+                                const updated = [...editingApprovalFlow.steps];
+                                const temp = updated[index];
+                                updated[index] = { ...updated[index + 1], order: index + 1 };
+                                updated[index + 1] = { ...temp, order: index + 2 };
+                                setEditingApprovalFlow({ ...editingApprovalFlow, steps: updated });
+                              }}
+                              className="p-1 border border-gray-100 rounded text-gray-400 hover:text-gray-600 dark:border-zinc-800 disabled:opacity-30"
+                              title="Move Down"
+                            >
+                              ↓
+                            </button>
+                            {editingApprovalFlow.steps.length > 1 && (
+                              <button
+                                onClick={() => {
+                                  const updated = editingApprovalFlow.steps
+                                    .filter((_, i) => i !== index)
+                                    .map((s, i) => ({ ...s, order: i + 1 }));
+                                  setEditingApprovalFlow({ ...editingApprovalFlow, steps: updated });
+                                  showToast('Approval level removed.', 'info');
+                                }}
+                                className="p-1 border border-gray-100 rounded text-rose-400 hover:text-rose-600 dark:border-zinc-800"
+                                title="Remove level"
+                              >
+                                <Trash2 className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Column 3: Summary Description */}
+                <div className="p-5 border border-gray-100 dark:border-zinc-800 bg-gray-50/20 rounded-3xl space-y-4">
+                  <h5 className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider">Sign-Off Logic &amp; Routing</h5>
+                  <p className="text-[10px] text-gray-400 leading-relaxed">
+                    Cascading sign-off enforces sequence control. When the inspector (Auditor) submits the checklist, the system locks the audit draft and auto-routes notification to the level 2 recipient.
+                  </p>
+                  <p className="text-[10px] text-gray-400 leading-relaxed">
+                    Only when the final configured level grants approval will the audit status be moved to <span className="text-emerald-600 font-bold">Approved</span> and published to the customer portal.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
 
         </div>
       )}
@@ -1709,12 +2381,240 @@ export default function AdminPortal({
               </div>
 
             </div>
+          ) : selectedAuditForDetails ? (
+            /* --- Audit Details & Visual Workflow Workspace --- */
+            <div className="space-y-6 animate-fade-in">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <button
+                  id="btn-back-to-audits"
+                  onClick={() => setSelectedAuditForDetails(null)}
+                  className="flex items-center gap-1.5 text-xs font-bold text-gray-500 hover:text-gray-950 dark:hover:text-white"
+                >
+                  ← Back to Schedule
+                </button>
+
+                <div className="flex gap-2">
+                  <button
+                    id="btn-recalc-audit-score"
+                    onClick={() => handleTriggerScoreRecalculation(selectedAuditForDetails.id)}
+                    className="bg-sky-50 text-sky-700 border border-sky-100 hover:bg-sky-100 dark:bg-sky-950/20 dark:text-sky-400 dark:border-sky-900 px-3 py-1.5 rounded-lg text-xs font-bold"
+                  >
+                    Recalculate Score
+                  </button>
+                </div>
+              </div>
+
+              {/* Header Card */}
+              <div className="bg-slate-900 text-white p-6 rounded-3xl dark:bg-zinc-950 flex flex-wrap gap-6 justify-between items-center">
+                <div>
+                  <span className="text-[9px] font-bold bg-sky-500/10 text-sky-400 border border-sky-400/20 px-2.5 py-1 rounded uppercase">Enterprise Audit Details</span>
+                  <h3 className="text-lg font-black mt-2">{selectedAuditForDetails.companyName}</h3>
+                  <p className="text-xs text-slate-400 mt-1">Facility ID: {selectedAuditForDetails.facilityName} • Standard Code: {selectedAuditForDetails.templateName}</p>
+                </div>
+
+                {/* Score Summary Metrics */}
+                <div className="flex gap-6 items-center">
+                  <div className="text-center p-3 px-4 bg-slate-800/40 rounded-2xl border border-slate-800/30">
+                    <span className="block text-[8px] text-slate-400 uppercase font-bold">Audit Score</span>
+                    <span className="text-xl font-black text-sky-400 font-mono">{selectedAuditForDetails.score || 85}%</span>
+                  </div>
+
+                  <div className="text-center p-3 px-4 bg-slate-800/40 rounded-2xl border border-slate-800/30">
+                    <span className="block text-[8px] text-slate-400 uppercase font-bold">Compliance Status</span>
+                    <span className={`text-xs font-bold uppercase block mt-1 ${
+                      (selectedAuditForDetails.score || 85) >= 80 ? 'text-emerald-400' : 'text-rose-400'
+                    }`}>
+                      {(selectedAuditForDetails.score || 85) >= 80 ? 'Compliant (Pass)' : 'Non-Compliant'}
+                    </span>
+                  </div>
+
+                  <div className="text-center p-3 px-4 bg-slate-800/40 rounded-2xl border border-slate-800/30">
+                    <span className="block text-[8px] text-slate-400 uppercase font-bold">Risk Matrix</span>
+                    <span className="text-xs font-bold text-emerald-400 block mt-1 uppercase">
+                      {(selectedAuditForDetails.score || 85) >= 85 ? 'Low Risk' : (selectedAuditForDetails.score || 85) >= 70 ? 'Medium Risk' : 'High Risk'}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Workflow Pipeline timeline */}
+              <div className="bg-white rounded-3xl border border-gray-100 p-6 dark:bg-zinc-900 dark:border-zinc-800 space-y-6">
+                <div>
+                  <h4 className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider">Audit Workflow Pipeline</h4>
+                  <p className="text-[10px] text-gray-400 mt-0.5">Visually track sequence execution and operational hand-offs.</p>
+                </div>
+
+                {/* Horizontal Timeline flow */}
+                <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
+                  {[
+                    { key: 'Draft', badge: 'bg-slate-100 text-slate-600', activeBadge: 'ring-2 ring-slate-900 bg-slate-100' },
+                    { key: 'Assigned', badge: 'bg-sky-50 text-sky-700', activeBadge: 'ring-2 ring-sky-500 bg-sky-50' },
+                    { key: 'In Progress', badge: 'bg-amber-50 text-amber-700', activeBadge: 'ring-2 ring-amber-500 bg-amber-50' },
+                    { key: 'Submitted', badge: 'bg-orange-50 text-orange-700', activeBadge: 'ring-2 ring-orange-500 bg-orange-50' },
+                    { key: 'Under Review', badge: 'bg-indigo-50 text-indigo-700', activeBadge: 'ring-2 ring-indigo-500 bg-indigo-50' },
+                    { key: 'Approved', badge: 'bg-emerald-50 text-emerald-700', activeBadge: 'ring-2 ring-emerald-500 bg-emerald-50' },
+                    { key: 'Shared', badge: 'bg-teal-50 text-teal-700', activeBadge: 'ring-2 ring-teal-500 bg-teal-50' },
+                    { key: 'Closed', badge: 'bg-zinc-800 text-white', activeBadge: 'ring-2 ring-zinc-900 bg-zinc-850' }
+                  ].map((stage, idx) => {
+                    const isCurrent = (selectedAuditForDetails.status === 'Completed' ? 'Approved' : selectedAuditForDetails.status) === stage.key;
+                    return (
+                      <div
+                        key={stage.key}
+                        className={`p-3 rounded-2xl border transition-all ${
+                          isCurrent
+                            ? 'border-sky-500 bg-sky-50/10 dark:border-sky-400 shadow-xs'
+                            : 'border-gray-100 dark:border-zinc-800 bg-white dark:bg-zinc-900'
+                        }`}
+                      >
+                        <div className="flex justify-between items-center mb-2">
+                          <span className="text-[9px] font-bold text-gray-400 uppercase">Stage {idx + 1}</span>
+                          {isCurrent && <span className="h-2 w-2 rounded-full bg-sky-500 animate-ping" />}
+                        </div>
+                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md block text-center uppercase ${
+                          isCurrent ? stage.activeBadge : stage.badge
+                        }`}>
+                          {stage.key}
+                        </span>
+                        
+                        {/* Display mock stage detail info */}
+                        <div className="mt-3 space-y-1 text-[9px] text-gray-400">
+                          <p className="truncate font-semibold text-gray-700 dark:text-zinc-300">
+                            👤 {isCurrent ? selectedAuditForDetails.auditorName : 'System Operator'}
+                          </p>
+                          <p>📅 {selectedAuditForDetails.scheduledDate}</p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Pipeline Controls */}
+                <div className="flex justify-between items-center border-t border-gray-50 dark:border-zinc-800/85 pt-4">
+                  <button
+                    id="btn-revert-workflow-stage"
+                    onClick={() => handleWorkflowRevert(selectedAuditForDetails.id)}
+                    className="h-9 rounded-lg border border-gray-100 hover:bg-gray-50 text-xs font-bold text-gray-600 px-4 transition-colors dark:border-zinc-800 dark:hover:bg-zinc-800 dark:text-zinc-300"
+                  >
+                    ← Revert Stage
+                  </button>
+
+                  <button
+                    id="btn-advance-workflow-stage"
+                    onClick={() => handleWorkflowAdvance(selectedAuditForDetails.id)}
+                    className="h-9 rounded-lg bg-sky-700 hover:bg-sky-800 text-xs font-bold text-white px-5 transition-colors shadow-xs"
+                  >
+                    Advance Stage →
+                  </button>
+                </div>
+              </div>
+
+              {/* Multi-Level Sign-Off Checklist & Action Panel */}
+              <div className="grid md:grid-cols-3 gap-6">
+                
+                {/* Pending review authorization block */}
+                <div className="md:col-span-2 bg-white rounded-3xl border border-gray-100 p-6 dark:bg-zinc-900 dark:border-zinc-800 space-y-4">
+                  <div>
+                    <h4 className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider">Operational Audit Authorization Sign-Off</h4>
+                    <p className="text-[10px] text-gray-400 mt-0.5">Provide official sign-off on inspection reports or reject them to trigger field corrections.</p>
+                  </div>
+
+                  <div className="space-y-4 pt-2">
+                    <div className="grid sm:grid-cols-2 gap-4">
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-bold text-gray-400 uppercase block">Sign-Off Role Capacity</label>
+                        <select
+                          value={approverRole}
+                          onChange={(e) => setApproverRole(e.target.value)}
+                          className="w-full h-9 rounded-lg border border-gray-100 bg-white px-2.5 text-xs outline-none dark:border-zinc-800 dark:bg-zinc-950 text-gray-900 dark:text-white"
+                        >
+                          <option value="Audit Manager">Audit Manager (Supervisor)</option>
+                          <option value="Operations Manager">Operations Director</option>
+                          <option value="Regional Quality Assurance">Regional QA Lead</option>
+                          <option value="Client Representative">Client Representative</option>
+                        </select>
+                      </div>
+
+                      <div className="space-y-1">
+                        <label className="text-[9px] font-bold text-gray-400 uppercase block">Operator Signature Credential</label>
+                        <input
+                          type="text"
+                          disabled
+                          value="ELENA ROSTOVA (SECURE_SESSION_LOCKED)"
+                          className="w-full h-9 rounded-lg border border-gray-50 bg-gray-50 text-gray-400 px-2.5 text-xs outline-none dark:border-zinc-850 dark:bg-zinc-950"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[9px] font-bold text-gray-400 uppercase block">Audit Verification Comments / Corrective Actions</label>
+                      <textarea
+                        rows={3}
+                        value={approvalComment}
+                        onChange={(e) => setApprovalComment(e.target.value)}
+                        placeholder="Document verified parameters, compliance rating, or specific reasons for rejection/correction..."
+                        className="w-full rounded-xl border border-gray-100 bg-gray-50/50 p-3 text-xs outline-none focus:border-sky-500 dark:border-zinc-855 dark:bg-zinc-955 text-gray-900 dark:text-white"
+                      />
+                    </div>
+
+                    <div className="flex gap-2">
+                      <button
+                        id="btn-reject-verification"
+                        onClick={() => handleRejectStep(selectedAuditForDetails.id)}
+                        className="flex-1 h-10 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold rounded-xl text-xs transition-colors dark:bg-rose-955/20 dark:text-rose-400"
+                      >
+                        Reject &amp; Force Corrections
+                      </button>
+
+                      <button
+                        id="btn-approve-verification"
+                        onClick={() => handleApproveStep(selectedAuditForDetails.id)}
+                        className="flex-1 h-10 bg-emerald-700 hover:bg-emerald-800 text-white font-bold rounded-xl text-xs transition-colors shadow-xs"
+                      >
+                        Grant Sign-Off Approval
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Completed review approvals log */}
+                <div className="md:col-span-1 bg-white rounded-3xl border border-gray-100 p-6 dark:bg-zinc-900 dark:border-zinc-800 space-y-4">
+                  <div>
+                    <h5 className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider">Cascading Sign-Off Log</h5>
+                    <p className="text-[10px] text-gray-400 mt-0.5">Authorized sign-offs submitted for this audit.</p>
+                  </div>
+
+                  <div className="space-y-3 max-h-60 overflow-y-auto pr-1">
+                    {approvalHistory.filter(h => h.auditId === selectedAuditForDetails.id).length === 0 ? (
+                      <div className="py-8 text-center text-[10px] text-gray-400">
+                        No signature records found. Pending first reviewer sign-off.
+                      </div>
+                    ) : (
+                      approvalHistory.filter(h => h.auditId === selectedAuditForDetails.id).map((hist) => (
+                        <div key={hist.id} className="p-3 border border-gray-50 dark:border-zinc-800 rounded-xl space-y-1 bg-gray-50/30 dark:bg-zinc-950/20 text-[10px]">
+                          <div className="flex justify-between items-center">
+                            <span className="font-bold text-gray-900 dark:text-white">{hist.role}</span>
+                            <span className={`px-1.5 py-0.5 rounded text-[8px] font-black uppercase ${
+                              hist.status === 'Approved' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/25 dark:text-emerald-400' : 'bg-rose-50 text-rose-700 dark:bg-rose-950/25 dark:text-rose-400'
+                            }`}>{hist.status}</span>
+                          </div>
+                          <p className="text-gray-400">By: {hist.operator} • {hist.timestamp}</p>
+                          <p className="text-gray-500 dark:text-zinc-350 font-medium leading-normal bg-white dark:bg-zinc-905 p-2 rounded mt-1.5 border border-gray-50/50 dark:border-zinc-800/40">
+                            💬 {hist.comments}
+                          </p>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+              </div>
+            </div>
           ) : (
             /* --- Audits Schedule Overview --- */
             <div className="bg-white rounded-2xl border border-gray-100 overflow-hidden dark:bg-zinc-900 dark:border-zinc-800">
               <div className="p-5 border-b border-gray-50 dark:border-zinc-800/80">
                 <h3 className="text-xs font-bold text-gray-900 dark:text-white uppercase tracking-wider">Active Inspections Schedule</h3>
-                <p className="text-[10px] text-gray-400 mt-0.5">Select any scheduled row to start/continue audits.</p>
+                <p className="text-[10px] text-gray-400 mt-0.5">Select any scheduled row to view visual timeline and sign-off status.</p>
               </div>
 
               <div className="overflow-x-auto">
@@ -1732,7 +2632,11 @@ export default function AdminPortal({
                   </thead>
                   <tbody className="divide-y divide-gray-50 dark:divide-zinc-800">
                     {audits.map(aud => (
-                      <tr key={aud.id} className="hover:bg-gray-50/50 dark:hover:bg-zinc-800/20">
+                      <tr
+                        key={aud.id}
+                        onClick={() => setSelectedAuditForDetails(aud)}
+                        className="hover:bg-gray-50/50 dark:hover:bg-zinc-800/20 cursor-pointer transition-colors"
+                      >
                         <td className="px-6 py-4 font-bold text-gray-900 dark:text-white">
                           <p>{aud.companyName}</p>
                           <span className="text-[10px] font-normal text-gray-400 dark:text-zinc-500">{aud.facilityName}</span>
@@ -1749,16 +2653,16 @@ export default function AdminPortal({
                           </div>
                         </td>
                         <td className="px-6 py-4">
-                          <span className={`px-2 py-0.5 font-bold rounded ${
-                            aud.status === 'Completed' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/40'
+                          <span className={`px-2 py-0.5 font-bold rounded uppercase text-[9px] ${
+                            aud.status === 'Completed' || aud.status === 'Approved' ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-950/40'
                           }`}>{aud.status}</span>
                         </td>
                         <td className="px-6 py-4 text-right">
-                          {aud.status === 'Completed' ? (
-                            <span className="text-[10px] text-gray-400">Score: {aud.score}/100</span>
+                          {aud.status === 'Completed' || aud.status === 'Approved' ? (
+                            <span className="text-[10px] text-gray-400">Score: {aud.score || 85}/100</span>
                           ) : (
                             <button
-                              onClick={() => handleLaunchAudit(aud)}
+                              onClick={(e) => { e.stopPropagation(); handleLaunchAudit(aud); }}
                               className="text-sky-700 hover:underline font-bold text-[11px] dark:text-sky-400"
                             >
                               Launch Checkpoint

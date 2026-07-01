@@ -110,7 +110,7 @@ export interface Audit {
   auditorName: string;
   scheduledDate: string;
   completedDate?: string;
-  status: 'Scheduled' | 'In Progress' | 'Under Review' | 'Completed';
+  status: 'Scheduled' | 'In Progress' | 'Under Review' | 'Completed' | 'Draft' | 'Assigned' | 'Submitted' | 'Approved' | 'Shared' | 'Closed';
   progress: number; // Percentage
   answers: AuditAnswer[];
   score?: number; // 0-100 calculation
@@ -175,4 +175,65 @@ export interface Notification {
   time: string;
   read: boolean;
   type: 'info' | 'warning' | 'success' | 'alert';
+}
+
+export interface ScoringRule {
+  id: string;
+  templateId: string;
+  scoringMethod: 'Percentage' | 'Weighted' | 'PassFail' | 'RiskBased';
+  complianceThreshold: number;
+  criticalFailureEnabled: boolean;
+  weightedSections: { sectionId: string; sectionTitle: string; weight: number }[];
+  riskLevels: {
+    low: { label: string; threshold: number; color: string };
+    medium: { label: string; threshold: number; color: string };
+    high: { label: string; threshold: number; color: string };
+    critical: { label: string; threshold: number; color: string };
+  };
+}
+
+export interface ApprovalStep {
+  role: string;
+  order: number;
+  approvalRequired: boolean;
+  commentRequired: boolean;
+  notificationRequired: boolean;
+  nextStep?: string;
+}
+
+export interface ApprovalFlow {
+  id: string;
+  templateId: string;
+  steps: ApprovalStep[];
+}
+
+export interface ApprovalHistory {
+  id: string;
+  auditId: string;
+  stepOrder: number;
+  role: string;
+  status: 'Pending' | 'Approved' | 'Rejected';
+  approver: string;
+  comments?: string;
+  timestamp: string;
+}
+
+export interface WorkflowStage {
+  id: string;
+  auditId: string;
+  status: 'Draft' | 'Assigned' | 'In Progress' | 'Submitted' | 'Under Review' | 'Approved' | 'Shared with Client' | 'Closed';
+  responsiblePerson: string;
+  date: string;
+  comments: string;
+  isCurrent: boolean;
+}
+
+export interface ActivityLog {
+  id: string;
+  auditId: string;
+  fromStatus: string;
+  toStatus: string;
+  timestamp: string;
+  operator: string;
+  comments: string;
 }
